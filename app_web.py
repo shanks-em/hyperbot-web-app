@@ -1,13 +1,14 @@
-# app_web.py - Application Web Complète avec Upload Dynamique
+# app_web.py - Application Web avec Nettoyage Automatique des Données
 """
-🌐 HYPERBOT WEB APP
+🌐 HYPERBOT WEB APP - Version avec Auto-Clean
 Application web permettant d'uploader dynamiquement:
 - Le fichier de stratégie (hyperbot_core.py)
-- Les données historiques (CSV)
+- Les données historiques (CSV) - Nettoyage automatique inclus
 """
 
 import streamlit as st
 import pandas as pd
+import numpy as np
 import io
 import sys
 import os
@@ -15,6 +16,7 @@ import tempfile
 import importlib.util
 from datetime import datetime
 import traceback
+import re
 
 # Configuration de la page
 st.set_page_config(
@@ -23,6 +25,165 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# =========================================================
+#  FONCTION DE NETTOYAGE AUTOMATIQUE DES DONNÉES
+# =========================================================
+def auto_clean_data(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
+    """
+    Nettoie automatiquement les données depuis différentes sources
+    (Investing.com, IPMS, Yahoo Finance, etc.)
+    
+    Returns:
+        (DataFrame nettoyé, message de log)
+    """
+    log_messages = []
+    
+    try:
+        # === ÉTAPE 1: Détection et normalisation des colonnes ===
+        log_messages.append("🔍 Détection du format des données...")
+        
+        # Mapper les noms de colonnes possibles
+        column_mapping = {
+            # Timestamps
+            "date": "timestamp",
+            "time": "timestamp",
+            "datetime": "timestamp",
+            
+            # Prix
+            "price": "close",
+            "last": "close",
+            "close price": "close",
+            
+            # Volume
+            "vol.": "volume",
+            "vol": "volume",
+            "volume": "volume",
+            
+            # Adj Close
+            "adj close": "adj close",
+            "adjusted": "adj close",
+        }
+        
+        # Normaliser les noms de colonnes (minuscules, trim)
+        df.columns = df.columns.str.strip().str.lower()
+        
+        # Appliquer le mapping
+        for old_name, new_name in column_mapping.items():
+            if old_name in df.columns and new_name not in df.columns:
+                df.rename(columns={old_name: new_name}, inplace=True)
+        
+        log_messages.append(f"✅ Colonnes détectées: {list(df.columns)}")
+        
+        # === ÉTAPE 2: Conversion du timestamp ===
+        if "timestamp" not in df.columns:
+            raise ValueError("❌ Aucune colonne de date/temps trouvée!")
+        
+        log_messages.append("📅 Conversion des dates...")
+        
+        # Détecter le format de date
+        sample_date = str(df["timestamp"].iloc[0])
+        
+        if "/" in sample_date:
+            # Format MM/DD/YYYY ou DD/MM/YYYY
+            try:
+                df["timestamp"] = pd.to_datetime(df["timestamp"], format="%m/%d/%Y")
+            except:
+                df["timestamp"] = pd.to_datetime(df["timestamp"], format="%d/%m/%Y")
+        elif "-" in sample_date:
+            # Format YYYY-MM-DD ou DD-MM-YYYY
+            df["timestamp"] = pd.to_datetime(df["timestamp"])
+        else:
+            df["timestamp"] = pd.to_datetime(df["timestamp"])
+        
+        log_messages.append(f"✅ Dates converties ({df['timestamp'].min()} → {df['timestamp'].max()})")
+        
+        # === ÉTAPE 3: Nettoyage des prix (enlever virgules, convertir) ===
+        log_messages.append("💰 Nettoyage des prix...")
+        
+        for col in ["close", "open", "high", "low"]:
+            if col in df.columns:
+                # Supprimer les virgules dans les nombres
+                df[col] = df[col].astype(str).str.replace(",", "")
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+        
+        # === ÉTAPE 4: Conversion du volume (K, M, B) ===
+        if "volume" in df.columns:
+            log_messages.append("📊 Conversion du volume...")
+            
+            def parse_volume(v):
+                if pd.isna(v):
+                    return 0.0
+                if isinstance(v, (int, float)):
+                    return float(v)
+                
+                v_str = str(v).strip().upper().replace(",", "")
+                
+                # Gérer les suffixes K, M, B
+                if v_str.endswith("K"):
+                    return float(v_str[:-1]) * 1_000
+                elif v_str.endswith("M"):
+                    return float(v_str[:-1]) * 1_000_000
+                elif v_str.endswith("B"):
+                    return float(v_str[:-1]) * 1_000_000_000
+                else:
+                    try:
+                        return float(v_str)
+                    except:
+                        return 0.0
+            
+            df["volume"] = df["volume"].apply(parse_volume)
+        else:
+            # Si pas de volume, créer une colonne par défaut
+            df["volume"] = 1000000
+            log_messages.append("⚠️ Pas de volume → valeur par défaut ajoutée")
+        
+        # === ÉTAPE 5: Ajouter adj close si manquant ===
+        if "adj close" not in df.columns:
+            df["adj close"] = df["close"]
+        
+        # === ÉTAPE 6: Réorganiser les colonnes ===
+        final_columns = ["timestamp", "open", "high", "low", "close", "adj close", "volume"]
+        
+        # Vérifier que toutes les colonnes essentielles existent
+        missing = [c for c in ["timestamp", "open", "high", "low", "close"] if c not in df.columns]
+        if missing:
+            raise ValueError(f"❌ Colonnes manquantes après nettoyage: {missing}")
+        
+        df = df[final_columns]
+        
+        # === ÉTAPE 7: Supprimer les valeurs aberrantes ===
+        log_messages.append("🧹 Nettoyage final...")
+        
+        # Supprimer les lignes avec NaN
+        before_clean = len(df)
+        df.dropna(subset=["open", "high", "low", "close"], inplace=True)
+        after_clean = len(df)
+        
+        if before_clean != after_clean:
+            log_messages.append(f"⚠️ {before_clean - after_clean} lignes avec NaN supprimées")
+        
+        # Trier par date
+        df = df.sort_values("timestamp").reset_index(drop=True)
+        
+        # Vérifier cohérence OHLC
+        df = df[
+            (df["high"] >= df["low"]) &
+            (df["high"] >= df["open"]) &
+            (df["high"] >= df["close"]) &
+            (df["low"] <= df["open"]) &
+            (df["low"] <= df["close"])
+        ]
+        
+        log_messages.append(f"✅ Données nettoyées: {len(df)} bougies valides")
+        
+        return df, "\n".join(log_messages)
+        
+    except Exception as e:
+        error_msg = f"❌ Erreur lors du nettoyage: {str(e)}\n{traceback.format_exc()}"
+        log_messages.append(error_msg)
+        return None, "\n".join(log_messages)
+
 
 # =========================================================
 #  FONCTION POUR CHARGER DYNAMIQUEMENT LA STRATÉGIE
@@ -56,52 +217,27 @@ def load_strategy_from_upload(uploaded_file):
 
 
 # =========================================================
-#  FONCTION POUR CHARGER LE CSV
+#  FONCTION POUR CHARGER LE CSV (avec auto-clean)
 # =========================================================
 @st.cache_data
-def load_csv_safely(uploaded_file) -> pd.DataFrame:
-    """Charge le CSV OHLCV de manière robuste"""
+def load_csv_safely(uploaded_file) -> tuple[pd.DataFrame, str]:
+    """Charge le CSV OHLCV avec nettoyage automatique"""
     try:
+        # Lire le CSV brut
         content = uploaded_file.read().decode("utf-8")
-        lines = content.splitlines()
-
-        # Trouver la ligne d'en-tête
-        skip = 0
-        for i, line in enumerate(lines[:10]):
-            if "close" in line.lower() or "open" in line.lower():
-                skip = i
-                break
-
-        df = pd.read_csv(io.StringIO(content), skiprows=skip)
-        df.columns = df.columns.str.strip().str.lower()
-
-        # Vérifier colonnes essentielles
-        required = {"open", "high", "low", "close"}
-        if not required.issubset(df.columns):
-            raise ValueError(f"Colonnes manquantes: {required - set(df.columns)}")
-
-        # Convertir en numérique
-        for col in ["open", "high", "low", "close", "volume"]:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
-
-        # Gérer les dates
-        if "date" in df.columns:
-            df.rename(columns={"date": "timestamp"}, inplace=True)
+        df = pd.read_csv(io.StringIO(content))
         
-        if "timestamp" in df.columns:
-            df["timestamp"] = pd.to_datetime(df["timestamp"])
-        else:
-            raise ValueError("Aucune colonne 'timestamp' ou 'date' trouvée")
-
-        df.dropna(inplace=True)
-        df = df.sort_values('timestamp').reset_index(drop=True)
+        # Appliquer le nettoyage automatique
+        cleaned_df, log = auto_clean_data(df)
         
-        return df
+        if cleaned_df is None:
+            return None, log
+        
+        return cleaned_df, log
         
     except Exception as e:
-        st.error(f"Erreur lors du chargement CSV: {e}")
-        return None
+        error_log = f"❌ Erreur lors du chargement CSV: {e}\n{traceback.format_exc()}"
+        return None, error_log
 
 
 # =========================================================
@@ -129,7 +265,7 @@ def detect_asset_type(df: pd.DataFrame) -> str:
 def main():
     # Titre
     st.title("🚀 HyperBot Trading Strategy Tester")
-    st.markdown("### 📊 Testez votre stratégie en uploadant vos fichiers")
+    st.markdown("### 📊 Testez votre stratégie avec nettoyage automatique des données")
     
     # Sidebar pour les uploads
     with st.sidebar:
@@ -148,21 +284,28 @@ def main():
         data_file = st.file_uploader(
             "Upload CSV OHLCV",
             type=["csv"],
-            help="Données avec colonnes: timestamp, open, high, low, close, volume"
+            help="Supporte: Investing.com, IPMS, Yahoo Finance, etc."
         )
         
         st.markdown("---")
         
         # Infos
-        with st.expander("ℹ️ Informations"):
+        with st.expander("ℹ️ Formats Supportés"):
             st.markdown("""
-            **Format CSV requis:**
-            - timestamp (ou date)
-            - open, high, low, close
-            - volume (optionnel)
+            **Sources compatibles:**
+            - 📈 Investing.com
+            - 💹 IPMS
+            - 📊 Yahoo Finance
+            - 🌐 TradingView
+            - Et autres...
             
-            **Stratégie:**
-            - Doit contenir `HyperBotOptimized` et `StrategyConfig`
+            **Colonnes reconnues:**
+            - Date/Time/Timestamp
+            - Open, High, Low, Close
+            - Volume (avec K, M, B)
+            - Prix avec virgules (ex: "1,234.56")
+            
+            ✨ **Nettoyage automatique !**
             """)
     
     # Zone principale
@@ -185,10 +328,15 @@ class HyperBotOptimized:
         
         with col2:
             st.markdown("### 📊 Étape 2: Uploader les Données")
+            st.markdown("**Formats acceptés:**")
             st.code("""
+# Investing.com
+Date,Price,Open,High,Low,Vol.,Change %
+12/01/2024,1.0523,1.0510,1.0530,1.0500,41.95K,-0.12%
+
+# Format standard
 timestamp,open,high,low,close,volume
 2024-01-01,42000,42500,41800,42300,1500000
-2024-01-02,42300,43000,42100,42800,1800000
             """, language="csv")
         
         return
@@ -205,22 +353,27 @@ timestamp,open,high,low,close,volume
         
         st.success("✅ Stratégie chargée avec succès!")
     
-    # Charger les données
-    with st.spinner("📊 Chargement des données..."):
-        df = load_csv_safely(data_file)
+    # Charger et nettoyer les données
+    with st.spinner("🧹 Chargement et nettoyage des données..."):
+        df, clean_log = load_csv_safely(data_file)
+        
+        # Afficher le log de nettoyage
+        with st.expander("📋 Log de Nettoyage des Données"):
+            st.code(clean_log)
         
         if df is None:
-            st.error("❌ Impossible de charger le fichier CSV")
+            st.error("❌ Impossible de charger/nettoyer le fichier CSV")
             return
         
-        st.success(f"✅ {len(df)} bougies chargées")
+        st.success(f"✅ {len(df)} bougies chargées et nettoyées")
     
     # Afficher aperçu des données
-    with st.expander("👀 Aperçu des Données"):
-        col1, col2, col3 = st.columns(3)
+    with st.expander("👀 Aperçu des Données Nettoyées"):
+        col1, col2, col3, col4 = st.columns(4)
         col1.metric("Nombre de bougies", len(df))
         col2.metric("Date début", df['timestamp'].iloc[0].strftime('%Y-%m-%d'))
         col3.metric("Date fin", df['timestamp'].iloc[-1].strftime('%Y-%m-%d'))
+        col4.metric("Prix moyen", f"${df['close'].mean():.2f}")
         
         st.dataframe(df.head(10))
     
@@ -502,15 +655,15 @@ def show_footer():
     col1, col2, col3 = st.columns(3)
     
     with col1:
-        st.markdown("**📚 Documentation**")
-        st.markdown("[Guide d'utilisation](#)")
+        st.markdown("**📚 Auto-Clean Data**")
+        st.markdown("✨ Nettoyage automatique")
     
     with col2:
-        st.markdown("**⚙️ Configuration**")
-        st.markdown("Version: 2.0")
+        st.markdown("**⚙️ Multi-Source**")
+        st.markdown("Investing.com, IPMS, Yahoo...")
     
     with col3:
-        st.markdown("**🤖 HyperBot**")
+        st.markdown("**🤖 HyperBot v2.1**")
         st.markdown("Trading Strategy Tester")
 
 
