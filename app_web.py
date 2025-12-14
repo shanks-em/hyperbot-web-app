@@ -654,6 +654,30 @@ timestamp,open,high,low,close,volume
             # AFFICHAGE DES RÉSULTATS
             st.success("✅ Backtest terminé!")
             
+            # Vérifier que les stats sont valides
+            if not stats or not isinstance(stats, dict):
+                st.error("❌ Erreur: Les statistiques n'ont pas pu être calculées")
+                st.info("Vérifiez que votre fichier hyperbot_core.py contient bien la méthode `get_statistics()`")
+                return
+            
+            # Définir des valeurs par défaut pour les stats manquantes
+            default_stats = {
+                'final_equity': initial_capital,
+                'total_return_pct': 0.0,
+                'win_rate': 0.0,
+                'max_drawdown': 0.0,
+                'total_trades': 0,
+                'profit_factor': 0.0,
+                'trades_per_month': 0.0,
+                'avg_win': 0.0,
+                'avg_loss': 0.0,
+                'duration_days': 0,
+                'monthly_return_pct': 0.0
+            }
+            
+            # Fusionner les stats avec les valeurs par défaut
+            stats = {**default_stats, **stats}
+            
             # KPIs principaux
             st.markdown("### 📊 Résultats Globaux")
             col1, col2, col3, col4, col5 = st.columns(5)
@@ -687,26 +711,48 @@ timestamp,open,high,low,close,volume
             col1, col2, col3 = st.columns(3)
             
             with col1:
-                st.metric("Profit Factor", f"{stats['profit_factor']:.2f}")
-                st.metric("Trades/Mois", f"{stats['trades_per_month']:.1f}")
+                st.metric("Profit Factor", f"{stats.get('profit_factor', 0):.2f}")
+                st.metric("Trades/Mois", f"{stats.get('trades_per_month', 0):.1f}")
             
             with col2:
-                st.metric("Gain Moyen", f"${stats['avg_win']:,.2f}")
-                st.metric("Perte Moyenne", f"${stats['avg_loss']:,.2f}")
+                st.metric("Gain Moyen", f"${stats.get('avg_win', 0):,.2f}")
+                st.metric("Perte Moyenne", f"${stats.get('avg_loss', 0):,.2f}")
             
             with col3:
-                st.metric("Durée (jours)", stats['duration_days'])
-                st.metric("Rendement Mensuel", f"{stats['monthly_return_pct']:.2f}%")
+                st.metric("Durée (jours)", stats.get('duration_days', 0))
+                st.metric("Rendement Mensuel", f"{stats.get('monthly_return_pct', 0):.2f}%")
+            
+            # Stats supplémentaires si disponibles
+            if 'max_pyramid_level' in stats or 'avg_pyramid_level' in stats:
+                st.markdown("### 🔺 Pyramiding")
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    if 'max_pyramid_level' in stats:
+                        st.metric("Niveau Max", stats['max_pyramid_level'])
+                
+                with col2:
+                    if 'avg_pyramid_level' in stats:
+                        st.metric("Niveau Moyen", f"{stats['avg_pyramid_level']:.2f}")
+                
+                with col3:
+                    if 'total_entries' in stats:
+                        st.metric("Total Entrées", stats['total_entries'])
             
             # Graphique Equity Curve
             st.markdown("### 📈 Courbe d'Équité")
-            equity_df = pd.DataFrame({
-                'Equity': strategy.equity_curve
-            })
-            st.line_chart(equity_df)
+            
+            # Vérifier que equity_curve existe
+            if hasattr(strategy, 'equity_curve') and strategy.equity_curve:
+                equity_df = pd.DataFrame({
+                    'Equity': strategy.equity_curve
+                })
+                st.line_chart(equity_df)
+            else:
+                st.warning("⚠️ Aucune courbe d'équité disponible")
             
             # Liste des trades
-            if strategy.trades:
+            if hasattr(strategy, 'trades') and strategy.trades:
                 st.markdown("### 🔍 Liste des Trades")
                 trades_df = pd.DataFrame(strategy.trades)
                 
@@ -746,6 +792,8 @@ timestamp,open,high,low,close,volume
                     f"trades_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
                     "text/csv"
                 )
+            else:
+                st.info("ℹ️ Aucun trade exécuté pendant le backtest")
             
             # Warning si pas de trades
             if stats['total_trades'] == 0:
@@ -765,8 +813,15 @@ timestamp,open,high,low,close,volume
         
         except Exception as e:
             st.error(f"❌ Erreur lors du backtest:\n```\n{str(e)}\n```")
-            with st.expander("🔍 Stack trace"):
+            with st.expander("🔍 Stack trace complet"):
                 st.code(traceback.format_exc())
+            
+            # Afficher les infos de debug
+            st.markdown("### 🔍 Informations de Debug")
+            st.write("**Colonnes du DataFrame:**", list(df.columns))
+            st.write("**Shape du DataFrame:**", df.shape)
+            st.write("**Premières lignes:**")
+            st.dataframe(df.head())
 
 
 # =========================================================
