@@ -41,7 +41,7 @@ def auto_clean_data(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
     
     try:
         # === ÉTAPE 0: Détection CSV sans entêtes ===
-        log_messages.append("🔍 Détection du format des données...")
+        log_messages.append("🔍 Analyse de la structure...")
         
         # Vérifier si la première ligne contient des données numériques (pas d'entêtes)
         first_row = df.iloc[0]
@@ -50,15 +50,24 @@ def auto_clean_data(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
         # alors le CSV n'a probablement pas d'entêtes
         has_headers = True
         
-        # Test 1: Vérifier si les noms de colonnes ressemblent à des données
-        if df.columns[0].replace('-', '').replace(':', '').replace(' ', '').replace('/', '').isdigit():
+        # Test 1: Si les colonnes sont nommées "0", "1", "2"... (pandas par défaut sans header)
+        if all(isinstance(col, int) for col in df.columns):
             has_headers = False
-            log_messages.append("⚠️ Détection: CSV SANS ENTÊTES")
+            log_messages.append("⚠️ CSV SANS ENTÊTES détecté (colonnes numériques)")
         
-        # Test 2: Si les colonnes sont nommées "0", "1", "2"... (pandas par défaut)
-        if all(isinstance(col, int) or str(col).isdigit() for col in df.columns):
-            has_headers = False
-            log_messages.append("⚠️ Détection: CSV SANS ENTÊTES (colonnes numériques)")
+        # Test 2: Vérifier si le nom de la première colonne ressemble à une date
+        elif df.columns[0] and (
+            '-' in str(df.columns[0]) or 
+            '/' in str(df.columns[0]) or 
+            ':' in str(df.columns[0])
+        ):
+            # Vérifier si c'est une vraie date
+            try:
+                pd.to_datetime(str(df.columns[0]))
+                has_headers = False
+                log_messages.append("⚠️ CSV SANS ENTÊTES détecté (première ligne = date)")
+            except:
+                pass
         
         # Si pas d'entêtes, appliquer les noms standards
         if not has_headers:
@@ -67,17 +76,18 @@ def auto_clean_data(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
             if num_cols == 6:
                 # Format: DateTime, Open, High, Low, Close, Volume
                 df.columns = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
-                log_messages.append("✅ Entêtes ajoutées: DateTime, Open, High, Low, Close, Volume")
+                log_messages.append("✅ Entêtes ajoutées: timestamp, open, high, low, close, volume")
             elif num_cols == 5:
                 # Sans volume
                 df.columns = ['timestamp', 'open', 'high', 'low', 'close']
-                log_messages.append("✅ Entêtes ajoutées: DateTime, Open, High, Low, Close")
+                df['volume'] = 1000000  # Valeur par défaut
+                log_messages.append("✅ Entêtes ajoutées: timestamp, open, high, low, close (volume ajouté)")
             elif num_cols == 7:
                 # Avec adj close
                 df.columns = ['timestamp', 'open', 'high', 'low', 'close', 'adj close', 'volume']
-                log_messages.append("✅ Entêtes ajoutées: DateTime, Open, High, Low, Close, Adj Close, Volume")
+                log_messages.append("✅ Entêtes ajoutées: timestamp, open, high, low, close, adj close, volume")
             else:
-                log_messages.append(f"⚠️ Nombre de colonnes inhabituel: {num_cols}")
+                raise ValueError(f"❌ Nombre de colonnes non supporté: {num_cols}. Attendu: 5, 6 ou 7 colonnes.")
         
         # === ÉTAPE 1: Détection et normalisation des colonnes ===
         # Mapper les noms de colonnes possibles
@@ -294,7 +304,25 @@ def load_csv_safely(uploaded_file) -> tuple[pd.DataFrame, str]:
     try:
         # Lire le CSV brut
         content = uploaded_file.read().decode("utf-8")
-        df = pd.read_csv(io.StringIO(content))
+        
+        # Détecter le séparateur (virgule, tab, point-virgule)
+        first_line = content.split('\n')[0]
+        
+        if '\t' in first_line:
+            separator = '\t'
+            sep_name = "TAB"
+        elif ';' in first_line:
+            separator = ';'
+            sep_name = "Point-virgule"
+        elif ',' in first_line:
+            separator = ','
+            sep_name = "Virgule"
+        else:
+            separator = ','
+            sep_name = "Virgule (défaut)"
+        
+        # Lire avec le bon séparateur
+        df = pd.read_csv(io.StringIO(content), sep=separator, header=None if separator == '\t' else 'infer')
         
         # Appliquer le nettoyage automatique
         cleaned_df, log = auto_clean_data(df)
@@ -302,7 +330,10 @@ def load_csv_safely(uploaded_file) -> tuple[pd.DataFrame, str]:
         if cleaned_df is None:
             return None, log
         
-        return cleaned_df, log
+        # Ajouter l'info du séparateur au log
+        final_log = f"🔍 Séparateur détecté: {sep_name}\n{log}"
+        
+        return cleaned_df, final_log
         
     except Exception as e:
         error_log = f"❌ Erreur lors du chargement CSV: {e}\n{traceback.format_exc()}"
