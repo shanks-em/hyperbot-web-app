@@ -40,9 +40,46 @@ def auto_clean_data(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
     log_messages = []
     
     try:
-        # === ÉTAPE 1: Détection et normalisation des colonnes ===
+        # === ÉTAPE 0: Détection CSV sans entêtes ===
         log_messages.append("🔍 Détection du format des données...")
         
+        # Vérifier si la première ligne contient des données numériques (pas d'entêtes)
+        first_row = df.iloc[0]
+        
+        # Si la première colonne ressemble à une date ET toutes les autres sont numériques
+        # alors le CSV n'a probablement pas d'entêtes
+        has_headers = True
+        
+        # Test 1: Vérifier si les noms de colonnes ressemblent à des données
+        if df.columns[0].replace('-', '').replace(':', '').replace(' ', '').replace('/', '').isdigit():
+            has_headers = False
+            log_messages.append("⚠️ Détection: CSV SANS ENTÊTES")
+        
+        # Test 2: Si les colonnes sont nommées "0", "1", "2"... (pandas par défaut)
+        if all(isinstance(col, int) or str(col).isdigit() for col in df.columns):
+            has_headers = False
+            log_messages.append("⚠️ Détection: CSV SANS ENTÊTES (colonnes numériques)")
+        
+        # Si pas d'entêtes, appliquer les noms standards
+        if not has_headers:
+            num_cols = len(df.columns)
+            
+            if num_cols == 6:
+                # Format: DateTime, Open, High, Low, Close, Volume
+                df.columns = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
+                log_messages.append("✅ Entêtes ajoutées: DateTime, Open, High, Low, Close, Volume")
+            elif num_cols == 5:
+                # Sans volume
+                df.columns = ['timestamp', 'open', 'high', 'low', 'close']
+                log_messages.append("✅ Entêtes ajoutées: DateTime, Open, High, Low, Close")
+            elif num_cols == 7:
+                # Avec adj close
+                df.columns = ['timestamp', 'open', 'high', 'low', 'close', 'adj close', 'volume']
+                log_messages.append("✅ Entêtes ajoutées: DateTime, Open, High, Low, Close, Adj Close, Volume")
+            else:
+                log_messages.append(f"⚠️ Nombre de colonnes inhabituel: {num_cols}")
+        
+        # === ÉTAPE 1: Détection et normalisation des colonnes ===
         # Mapper les noms de colonnes possibles
         column_mapping = {
             # Timestamps
@@ -73,7 +110,7 @@ def auto_clean_data(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
             if old_name in df.columns and new_name not in df.columns:
                 df.rename(columns={old_name: new_name}, inplace=True)
         
-        log_messages.append(f"✅ Colonnes détectées: {list(df.columns)}")
+        log_messages.append(f"✅ Colonnes finales: {list(df.columns)}")
         
         # === ÉTAPE 2: Conversion du timestamp ===
         if "timestamp" not in df.columns:
@@ -82,32 +119,63 @@ def auto_clean_data(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
         log_messages.append("📅 Conversion des dates...")
         
         # Détecter le format de date
-        sample_date = str(df["timestamp"].iloc[0])
+        sample_date = str(df["timestamp"].iloc[0]).strip()
         
-        if "/" in sample_date:
+        # Format: "2009-12-02 11:00" ou "2009-12-02 11:00:00"
+        if "-" in sample_date and (":" in sample_date or " " in sample_date):
+            try:
+                # Format ISO avec heure: YYYY-MM-DD HH:MM ou YYYY-MM-DD HH:MM:SS
+                df["timestamp"] = pd.to_datetime(df["timestamp"], format="%Y-%m-%d %H:%M")
+                log_messages.append("✅ Format détecté: YYYY-MM-DD HH:MM")
+            except:
+                try:
+                    df["timestamp"] = pd.to_datetime(df["timestamp"], format="%Y-%m-%d %H:%M:%S")
+                    log_messages.append("✅ Format détecté: YYYY-MM-DD HH:MM:SS")
+                except:
+                    # Laisser pandas deviner
+                    df["timestamp"] = pd.to_datetime(df["timestamp"])
+                    log_messages.append("✅ Format détecté automatiquement")
+        
+        elif "/" in sample_date:
             # Format MM/DD/YYYY ou DD/MM/YYYY
             try:
                 df["timestamp"] = pd.to_datetime(df["timestamp"], format="%m/%d/%Y")
+                log_messages.append("✅ Format détecté: MM/DD/YYYY")
             except:
-                df["timestamp"] = pd.to_datetime(df["timestamp"], format="%d/%m/%Y")
+                try:
+                    df["timestamp"] = pd.to_datetime(df["timestamp"], format="%d/%m/%Y")
+                    log_messages.append("✅ Format détecté: DD/MM/YYYY")
+                except:
+                    df["timestamp"] = pd.to_datetime(df["timestamp"])
+                    log_messages.append("✅ Format détecté automatiquement")
+        
         elif "-" in sample_date:
-            # Format YYYY-MM-DD ou DD-MM-YYYY
-            df["timestamp"] = pd.to_datetime(df["timestamp"])
+            # Format YYYY-MM-DD (sans heure)
+            try:
+                df["timestamp"] = pd.to_datetime(df["timestamp"], format="%Y-%m-%d")
+                log_messages.append("✅ Format détecté: YYYY-MM-DD")
+            except:
+                df["timestamp"] = pd.to_datetime(df["timestamp"])
+                log_messages.append("✅ Format détecté automatiquement")
         else:
+            # Laisser pandas deviner
             df["timestamp"] = pd.to_datetime(df["timestamp"])
+            log_messages.append("✅ Format de date deviné par pandas")
         
-        log_messages.append(f"✅ Dates converties ({df['timestamp'].min()} → {df['timestamp'].max()})")
+        log_messages.append(f"📆 Période: {df['timestamp'].min()} → {df['timestamp'].max()}")
         
-        # === ÉTAPE 3: Nettoyage des prix (enlever virgules, convertir) ===
+        # === ÉTAPE 3: Nettoyage des prix (enlever virgules, espaces, tabs) ===
         log_messages.append("💰 Nettoyage des prix...")
         
         for col in ["close", "open", "high", "low"]:
             if col in df.columns:
-                # Supprimer les virgules dans les nombres
-                df[col] = df[col].astype(str).str.replace(",", "")
+                # Supprimer les virgules, espaces, et tabs dans les nombres
+                df[col] = df[col].astype(str).str.replace(",", "").str.strip()
                 df[col] = pd.to_numeric(df[col], errors="coerce")
         
-        # === ÉTAPE 4: Conversion du volume (K, M, B) ===
+        log_messages.append(f"✅ Prix nettoyés (moyenne close: {df['close'].mean():.5f})")
+        
+        # === ÉTAPE 4: Conversion du volume (K, M, B) ou simple nombre ===
         if "volume" in df.columns:
             log_messages.append("📊 Conversion du volume...")
             
@@ -117,7 +185,7 @@ def auto_clean_data(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
                 if isinstance(v, (int, float)):
                     return float(v)
                 
-                v_str = str(v).strip().upper().replace(",", "")
+                v_str = str(v).strip().upper().replace(",", "").replace(" ", "")
                 
                 # Gérer les suffixes K, M, B
                 if v_str.endswith("K"):
@@ -133,6 +201,7 @@ def auto_clean_data(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
                         return 0.0
             
             df["volume"] = df["volume"].apply(parse_volume)
+            log_messages.append(f"✅ Volume traité (moyenne: {df['volume'].mean():.0f})")
         else:
             # Si pas de volume, créer une colonne par défaut
             df["volume"] = 1000000
@@ -297,15 +366,20 @@ def main():
             - 💹 IPMS
             - 📊 Yahoo Finance
             - 🌐 TradingView
+            - 🔗 HistData.com
+            - 💱 Dukascopy
+            - ₿ CryptoDataDownload
             - Et autres...
             
             **Colonnes reconnues:**
-            - Date/Time/Timestamp
+            - Date/Time/Timestamp (formats multiples)
             - Open, High, Low, Close
-            - Volume (avec K, M, B)
+            - Volume (avec K, M, B ou simple nombre)
             - Prix avec virgules (ex: "1,234.56")
             
-            ✨ **Nettoyage automatique !**
+            **✨ CSV sans entêtes supporté !**
+            - Format: DateTime, O, H, L, C, Volume
+            - Les entêtes sont ajoutées automatiquement
             """)
     
     # Zone principale
@@ -330,9 +404,13 @@ class HyperBotOptimized:
             st.markdown("### 📊 Étape 2: Uploader les Données")
             st.markdown("**Formats acceptés:**")
             st.code("""
-# Investing.com
+# Investing.com (avec entêtes)
 Date,Price,Open,High,Low,Vol.,Change %
 12/01/2024,1.0523,1.0510,1.0530,1.0500,41.95K,-0.12%
+
+# HistData/Dukascopy (SANS entêtes) ✨
+2009-12-02 11:00	1.04445	1.04670	1.04400	1.04590	7251
+2009-12-02 12:00	1.04585	1.04670	1.04490	1.04490	5392
 
 # Format standard
 timestamp,open,high,low,close,volume
