@@ -302,27 +302,40 @@ def load_strategy_from_upload(uploaded_file):
 def load_csv_safely(uploaded_file) -> tuple[pd.DataFrame, str]:
     """Charge le CSV OHLCV avec nettoyage automatique"""
     try:
-        # Lire le CSV brut
+        # Lire le contenu brut
         content = uploaded_file.read().decode("utf-8")
         
-        # Détecter le séparateur (virgule, tab, point-virgule)
-        first_line = content.split('\n')[0]
+        # Détecter le séparateur en analysant les premières lignes
+        lines = content.split('\n')[:5]  # Analyser les 5 premières lignes
         
-        if '\t' in first_line:
-            separator = '\t'
-            sep_name = "TAB"
-        elif ';' in first_line:
-            separator = ';'
-            sep_name = "Point-virgule"
-        elif ',' in first_line:
-            separator = ','
-            sep_name = "Virgule"
-        else:
-            separator = ','
-            sep_name = "Virgule (défaut)"
+        separator = ','
+        sep_name = "Virgule"
         
-        # Lire avec le bon séparateur
-        df = pd.read_csv(io.StringIO(content), sep=separator, header=None if separator == '\t' else 'infer')
+        for line in lines:
+            if not line.strip():
+                continue
+            
+            # Compter les séparateurs possibles
+            tab_count = line.count('\t')
+            comma_count = line.count(',')
+            semicolon_count = line.count(';')
+            
+            # Choisir le séparateur le plus fréquent
+            if tab_count > comma_count and tab_count > semicolon_count and tab_count >= 4:
+                separator = '\t'
+                sep_name = "TAB"
+                break
+            elif semicolon_count > comma_count and semicolon_count >= 4:
+                separator = ';'
+                sep_name = "Point-virgule"
+                break
+            elif comma_count >= 4:
+                separator = ','
+                sep_name = "Virgule"
+                break
+        
+        # Lire le CSV avec le bon séparateur et SANS header pour détecter
+        df = pd.read_csv(io.StringIO(content), sep=separator, header=None, low_memory=False)
         
         # Appliquer le nettoyage automatique
         cleaned_df, log = auto_clean_data(df)
@@ -331,7 +344,7 @@ def load_csv_safely(uploaded_file) -> tuple[pd.DataFrame, str]:
             return None, log
         
         # Ajouter l'info du séparateur au log
-        final_log = f"🔍 Séparateur détecté: {sep_name}\n{log}"
+        final_log = f"🔍 Séparateur détecté: {sep_name} ({df.shape[1]} colonnes)\n{log}"
         
         return cleaned_df, final_log
         
